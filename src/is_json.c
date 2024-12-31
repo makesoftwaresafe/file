@@ -32,7 +32,7 @@
 #include "file.h"
 
 #ifndef lint
-FILE_RCSID("@(#)$File: is_json.c,v 1.22 2022/06/11 19:24:41 christos Exp $")
+FILE_RCSID("@(#)$File: is_json.c,v 1.30 2022/09/27 19:12:40 christos Exp $")
 #endif
 
 #include "magic.h"
@@ -122,6 +122,7 @@ json_skip_space(const unsigned char *uc, const unsigned char *ue)
 	return uc;
 }
 
+/*ARGSUSED*/
 static int
 json_parse_string(const unsigned char **ucp, const unsigned char *ue,
     size_t lvl __file_debugused)
@@ -268,6 +269,7 @@ out:
 	return 0;
 }
 
+/*ARGSUSED*/
 static int
 json_parse_number(const unsigned char **ucp, const unsigned char *ue, 
     size_t lvl __file_debugused)
@@ -319,6 +321,7 @@ out:
 	return got;
 }
 
+/*ARGSUSED*/
 static int
 json_parse_const(const unsigned char **ucp, const unsigned char *ue,
     const char *str, size_t len, size_t lvl __file_debugused)
@@ -326,25 +329,28 @@ json_parse_const(const unsigned char **ucp, const unsigned char *ue,
 	const unsigned char *uc = *ucp;
 
 	DPRINTF("Parse const: ", uc, *ucp);
-	for (len--; uc < ue && --len;) {
-		if (*uc++ == *++str)
-			continue;
+	*ucp += --len - 1;
+	if (*ucp > ue)
+		*ucp = ue;
+	for (; uc < ue && --len;) {
+		if (*uc++ != *++str) {
+			DPRINTF("Bad const: ", uc, *ucp);
+			return 0;
+		}
 	}
-	if (len)
-		DPRINTF("Bad const: ", uc, *ucp);
-	*ucp = uc;
-	return len == 0;
+	DPRINTF("Good const: ", uc, *ucp);
+	return 1;
 }
 
 static int
 json_parse(const unsigned char **ucp, const unsigned char *ue,
     size_t *st, size_t lvl)
 {
-	const unsigned char *uc;
+	const unsigned char *uc, *ouc;
 	int rv = 0;
 	int t;
 
-	uc = json_skip_space(*ucp, ue);
+	ouc = uc = json_skip_space(*ucp, ue);
 	if (uc == ue)
 		goto out;
 
@@ -398,8 +404,16 @@ json_parse(const unsigned char **ucp, const unsigned char *ue,
 out:
 	DPRINTF("End general: ", uc, *ucp);
 	*ucp = uc;
-	if (lvl == 0)
-		return rv && uc == ue && (st[JSON_ARRAYN] || st[JSON_OBJECT]);
+	if (lvl == 0) {
+		if (!rv)
+			return 0;
+		if (uc == ue)
+			return (st[JSON_ARRAYN] || st[JSON_OBJECT]) ? 1 : 0;
+		if (*ouc == *uc && json_parse(&uc, ue, st, 1))
+			return (st[JSON_ARRAYN] || st[JSON_OBJECT]) ? 2 : 0;
+		else
+			return 0;
+	}
 	return rv;
 }
 
@@ -411,6 +425,7 @@ file_is_json(struct magic_set *ms, const struct buffer *b)
 	const unsigned char *ue = uc + b->flen;
 	size_t st[JSON_MAX];
 	int mime = ms->flags & MAGIC_MIME;
+	int jt;
 
 
 	if ((ms->flags & (MAGIC_APPLE|MAGIC_EXTENSION)) != 0)
@@ -418,17 +433,19 @@ file_is_json(struct magic_set *ms, const struct buffer *b)
 
 	memset(st, 0, sizeof(st));
 
-	if (!json_parse(&uc, ue, st, 0))
+	if ((jt = json_parse(&uc, ue, st, 0)) == 0)
 		return 0;
 
 	if (mime == MAGIC_MIME_ENCODING)
 		return 1;
 	if (mime) {
-		if (file_printf(ms, "application/json") == -1)
+		if (file_printf(ms, "application/%s",
+		    jt == 1 ? "json" : "x-ndjson") == -1)
 			return -1;
 		return 1;
 	}
-	if (file_printf(ms, "JSON text data") == -1)
+	if (file_printf(ms, "%sJSON text data",
+	    jt == 1 ? "" : "New Line Delimited ") == -1)
 		return -1;
 #if JSON_COUNT
 #define P(n) st[n], st[n] > 1 ? "s" : ""
@@ -458,7 +475,7 @@ file_is_json(struct magic_set *ms, const struct buffer *b)
 int
 main(int argc, char *argv[])
 {
-	int fd, rv;
+	int fd;
 	struct stat st;
 	unsigned char *p;
 	size_t stats[JSON_MAX];
